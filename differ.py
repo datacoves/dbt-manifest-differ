@@ -6,16 +6,11 @@ import pandas as pd
 from functions.flatten import flatten_keys
 from functions import tidy
 from pathlib import Path
+import os
 
 # Minimal viable imports from dbt-core
 from dbt.contracts.graph.manifest import WritableManifest
 from dbt.graph.selector_methods import StateSelectorMethod
-
-# we need to make sure that `~/.dbt` exists so that settings Flags doesn't crash
-Path("~/.dbt").expanduser().mkdir(exist_ok=True)
-
-flags = Flags.from_dict(CliCommand.LIST, {})
-set_flags(flags)
 
 class MockPreviousState:
     def __init__(self, manifest: WritableManifest) -> None:
@@ -25,17 +20,14 @@ st.set_page_config(layout="wide")
 st.title("dbt Manifest Differ")
 
 st.info("""Work out why your models built in a Slim CI run.
+This will look for your production manifest in $DATACOVES_DBT_HOME/logs
+and you current branch manifest in $DATACOVES_DBT_HOME/target
 
-Upload your production manifest on the left side, and the manifest from your Slim CI run on the right side. 
+False positives in `modified.configs` are likely to be due to `config()` blocks in a node's definition or in its `.yml` resource file.
 
-False positives in `modified.configs` are likely to be due to `config()` blocks in a node's definition or in its `.yml` resource file. 
-        
-To avoid false positives, define configs in `dbt_project.yml` instead. See [the docs on state comparison](https://docs.getdbt.com/reference/node-selection/state-comparison-caveats#false-positives) for more information.
+To avoid false positives, define configs in `dbt_project.yml` instead.
+See [the docs on state comparison](https://docs.getdbt.com/reference/node-selection/state-comparison-caveats#false-positives) for more information.
 """, icon = "💡")
-
-left_col, right_col = st.columns(2)
-left_manifest: WritableManifest = None
-right_manifest: WritableManifest = None
 
 # Copy-paste from https://github.com/dbt-labs/dbt-core/blob/0ab954e1af9bb2be01fa4ebad2df7626249a1fab/core/dbt/graph/selector_methods.py#L676
 state_options = [
@@ -48,29 +40,46 @@ state_options = [
     "modified.macros",
     "modified.contract"
 ]
+
 state_method = st.selectbox(label="State comparison method:", options=state_options)
 properties_to_ignore = st.multiselect("Properties to ignore when showing node-level diffs:", ['created_at', 'root_path', 'build_path', 'compiled_path', 'deferred', 'schema', 'checksum', 'compiled_code', 'database', 'relation_name'], default=['created_at', 'checksum', 'database', 'schema', 'relation_name', 'compiled_path', 'root_path', 'build_path'])
 skipped_large_seeds = set()
 
-def load_manifest(file: UploadedFile) -> WritableManifest:
-    data = json.load(file)
-    data, large_seeds = tidy.remove_large_seeds(data)
-    skipped_large_seeds.update(large_seeds)
-    return WritableManifest.upgrade_schema_version(data)
+def load_manifest(file_name: str) -> WritableManifest:
+    with open(file_name, 'r') as file:
+        data = json.load(file)
+        data, large_seeds = tidy.remove_large_seeds(data)
+        skipped_large_seeds.update(large_seeds)
+        return WritableManifest.upgrade_schema_version(data)
 
-left_file = left_col.file_uploader("First manifest", type='json', help="Pick your left json file")
-if left_file is not None:
-    left_manifest = load_manifest(left_file)
+# Find the dbt project location
+dbt_project_path = os.getenv("DATACOVES__DBT_HOME")
 
-right_file = right_col.file_uploader("Second manifest", type='json', help="Pick your right json file")
-if right_file is not None:
-    right_manifest = load_manifest(right_file)
+if dbt_project_path:
+    production_manifest_location = os.path.join(dbt_project_path, "logs", "manifest.json")
+    branch_manifest_location = os.path.join(dbt_project_path, "target", "manifest.json")
 
-if left_file and right_file:
+    not_found_files = []
+
+    if os.path.exists(production_manifest_location) and os.path.exists(branch_manifest_location):
+        production_manifest = load_manifest(production_manifest_location)
+        branch_manifest = load_manifest(branch_manifest_location)
+    else:
+        if not os.path.exists(production_manifest_location):
+            not_found_files.append("Production manifest file")
+        if not os.path.exists(branch_manifest_location):
+            not_found_files.append("Branch manifest file")
+
+        error_message = f"Manifest files not found: {', '.join(not_found_files)}. Please make sure the paths are correct."
+        st.warning(error_message)
+else:
+    st.warning("DATACOVES__DBT_HOME environment variable not set.")
+
+if not not_found_files:
     # TODO: also calculate diffs for sources, exposures, semantic_models, metrics
-    included_nodes = set(left_manifest.nodes.keys())
-    previous_state = MockPreviousState(right_manifest)
-    state_comparator = StateSelectorMethod(left_manifest, previous_state, "")
+    included_nodes = set(branch_manifest.nodes.keys())
+    previous_state = MockPreviousState(production_manifest)
+    state_comparator = StateSelectorMethod(branch_manifest, previous_state, "")
 
     if len(skipped_large_seeds) > 0:
         st.warning(f"Some large seeds couldn't be compared from the manifest alone: {skipped_large_seeds}" )
@@ -88,43 +97,43 @@ if left_file and right_file:
 
     st.bar_chart(state_inclusion_counts)
     selected_nodes = list(state_comparator.search(included_nodes, state_method))
-    
+
     if state_comparator.modified_macros:
         st.header("Modified macros")
         st.write(state_comparator.modified_macros)
-        
+
     st.header(f"{len(selected_nodes)} Selected node{'s' if len(selected_nodes) != 1 else ''}")
     for unique_id in selected_nodes:
-        
-        left_node = left_manifest.nodes.get(unique_id)
-        right_node = right_manifest.nodes.get(unique_id)
+
+        left_node = branch_manifest.nodes.get(unique_id)
+        right_node = production_manifest.nodes.get(unique_id)
         st.subheader(unique_id)
-        
+
         if left_node and right_node:
             left_dict = left_node.to_dict()
             right_dict = right_node.to_dict()
             all_keys = set(left_dict.keys()) | set(right_dict.keys())
             diffs = {
                 k: jsondiff.diff(
-                    left_dict.get(k, None), 
-                    right_dict.get(k, None), 
-                    syntax='symmetric', 
+                    left_dict.get(k, None),
+                    right_dict.get(k, None),
+                    syntax='symmetric',
                     marshal=True
                 )
-                for k in all_keys 
+                for k in all_keys
                 if k not in properties_to_ignore and (
-                    k not in right_dict 
-                    or k not in left_dict 
+                    k not in right_dict
+                    or k not in left_dict
                     or left_dict[k] != right_dict[k]
                 )
             }
-            
+
             st.write("##### State selectors that find this node:")
             st.code(state_inclusion_reasons_by_node[unique_id])
-            
+
             if left_node.depends_on.macros and state_comparator.modified_macros:
                 st.write(f"Depends on macros: {left_node.depends_on.macros}")
-            
+
             diff_json, right_full_json = st.columns(2)
 
             diff_json.write("##### JSON tree of diffs:")
@@ -140,17 +149,17 @@ if left_file and right_file:
                 st.dataframe(df, use_container_width=True)
             except Exception as e:
                 st.error(f"Couldn't print as table: {e}")
-        
-        
+
+
         elif not left_node:
-            st.warning(f"Missing from left manifest (brand new node)")
-        
+            st.warning(f"Missing from branch manifest (deleted node)")
+
         elif not right_node:
-            st.warning(f"Missing from right manifest (deleted node)")
+            st.warning(f"Missing from production manifest (new node)")
             st.write("State methods that pick this node up:")
             st.code(state_inclusion_reasons_by_node[unique_id])
 
         st.divider()
-        
+
 else:
-    st.warning("Upload two manifests to begin comparison", icon="👯")
+    st.warning("Production and branch manifests needed to perform comparison", icon="👯")
