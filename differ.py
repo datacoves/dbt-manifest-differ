@@ -95,19 +95,33 @@ if not not_found_files:
                 state_inclusion_reasons_by_node[node] = [state_option]
         state_inclusion_counts[state_option] = len((results))
 
-    st.bar_chart(state_inclusion_counts)
+    try:
+        df = pd.DataFrame(list(state_inclusion_counts.items()), columns=['Change Type', 'Number of changes'])
+        st.table(df.set_index('Change Type'))
+
+    except Exception as e:
+        st.error(f"Couldn't print as table: {e}")
+
+    st.divider()
+
     selected_nodes = list(state_comparator.search(included_nodes, state_method))
 
     if state_comparator.modified_macros:
         st.header("Modified macros")
         st.write(state_comparator.modified_macros)
 
-    st.header(f"{len(selected_nodes)} Selected node{'s' if len(selected_nodes) != 1 else ''}")
+    # st.header(f"{len(selected_nodes)} Selected node{'s' if len(selected_nodes) != 1 else ''}")
+    # st.subheader(f"{len(selected_nodes)} Selected node{'s' if len(selected_nodes) != 1 else ''}")
+    st.subheader(f"Found {len(selected_nodes)} different node{'s' if len(selected_nodes) != 1 else ''}")
+
     for unique_id in selected_nodes:
 
         left_node = branch_manifest.nodes.get(unique_id)
         right_node = production_manifest.nodes.get(unique_id)
-        st.subheader(unique_id)
+        # st.subheader(unique_id)
+        # st.write(unique_id)
+        # st.markdown(f"**{unique_id}**")
+        changed_model_name = unique_id
 
         if left_node and right_node:
             left_dict = left_node.to_dict()
@@ -132,7 +146,7 @@ if not not_found_files:
             st.code(state_inclusion_reasons_by_node[unique_id])
 
             if left_node.depends_on.macros and state_comparator.modified_macros:
-                st.write(f"Depends on macros: {left_node.depends_on.macros}")
+                st.write(f"{changed_model_name} depends on macros: {left_node.depends_on.macros}")
 
             diff_json, right_full_json = st.columns(2)
 
@@ -150,12 +164,12 @@ if not not_found_files:
             except Exception as e:
                 st.error(f"Couldn't print as table: {e}")
 
-
         elif not left_node:
-            st.warning(f"Missing from branch manifest (deleted node)")
+            st.markdown(f":blue[{changed_model_name}] is missing from :blue-background[**branch**] manifest (:gray-background[deleted model])")
 
         elif not right_node:
-            st.warning(f"Missing from production manifest (new node)")
+            st.markdown(f":blue[{changed_model_name}] is missing from :blue-background[**production**] manifest (:gray-background[added model])")
+
             st.write("State methods that pick this node up:")
             st.code(state_inclusion_reasons_by_node[unique_id])
 
